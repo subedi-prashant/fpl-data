@@ -147,12 +147,19 @@ if _USE_DB:
     @st.cache_data(ttl=6 * 3600)
     def get_players_df() -> pd.DataFrame:
         from fpl_data.analysis import load_players
-        return load_players(_DB_PATH)
+        df = load_players(_DB_PATH)
+        # Normalise column names to match API-mode names used throughout the dashboard
+        return df.rename(columns={
+            "points_per_game": "ppg",
+            "selected_by_percent": "selected_pct",
+        })
 
     @st.cache_data(ttl=6 * 3600)
     def get_fixtures_df() -> pd.DataFrame:
-        from fpl_data.analysis import load_fixtures, load_gameweeks
-        return load_fixtures(_DB_PATH)
+        from fpl_data.analysis import load_fixtures
+        df = load_fixtures(_DB_PATH)
+        # Normalise: analysis.py uses "event" for gameweek number; dashboard expects "gw"
+        return df.rename(columns={"event": "gw"})
 
     @st.cache_data(ttl=6 * 3600)
     def get_gameweeks_df() -> pd.DataFrame:
