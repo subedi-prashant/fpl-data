@@ -1,6 +1,10 @@
 # fpl-data
 
+[![Live Dashboard](https://img.shields.io/badge/Live%20Dashboard-myfpldata.streamlit.app-FF4B4B?logo=streamlit)](https://myfpldata.streamlit.app/)
+
 A Python project that fetches and stores **Fantasy Premier League** data from the public FPL API — no authentication required.
+
+🚀 **Live app**: [myfpldata.streamlit.app](https://myfpldata.streamlit.app/)
 
 ## What it fetches
 
@@ -135,22 +139,18 @@ The dashboard works in two modes:
 
 ## Deploy to Streamlit Community Cloud (free)
 
-1. **Push this repo to GitHub** (must be public for the free tier):
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   gh repo create my-fpl --public --source=. --push
-   ```
+> ✅ Already deployed at **[myfpldata.streamlit.app](https://myfpldata.streamlit.app/)**
 
-2. Go to **[share.streamlit.io](https://share.streamlit.io)** → sign in with GitHub → **New app**
+To deploy your own fork:
 
-3. Fill in:
-   - **Repository**: `your-username/my-fpl`
-   - **Branch**: `main`
-   - **Main file path**: `fpl-data/dashboard/app.py`
+1. Fork this repo and go to **[share.streamlit.io](https://share.streamlit.io)** → sign in with GitHub → **New app**
 
-4. Click **Deploy** — Streamlit Cloud installs from `requirements.txt` automatically.
+2. Fill in:
+   - **Repository**: `your-username/fpl-data`
+   - **Branch**: `master`
+   - **Main file path**: `dashboard/app.py`
+
+3. Click **Deploy** — Streamlit Cloud installs from `requirements.txt` automatically.
 
 The deployed app fetches live FPL data directly (no database hosting needed).
 
