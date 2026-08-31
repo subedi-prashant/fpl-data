@@ -80,6 +80,26 @@ class FPLClient:
         time.sleep(_PLAYER_SLEEP)
         return data
 
+    def get_manager(self, manager_id: int) -> dict:
+        """Return manager profile (name, team value, rank, points)."""
+        log.info("Fetching manager profile for id=%d", manager_id)
+        return self._get(f"{BASE_URL}/entry/{manager_id}/")
+
+    def get_manager_history(self, manager_id: int) -> dict:
+        """Return manager's season-by-season history and fixtures."""
+        log.info("Fetching manager history for id=%d", manager_id)
+        return self._get(f"{BASE_URL}/entry/{manager_id}/history/")
+
+    def get_manager_team(self, manager_id: int, gameweek: int) -> dict:
+        """Return manager's team picks for a specific gameweek."""
+        log.debug("Fetching manager team for id=%d, gameweek=%d", manager_id, gameweek)
+        return self._get(f"{BASE_URL}/entry/{manager_id}/event/{gameweek}/picks/")
+
+    def get_manager_transfers(self, manager_id: int) -> dict:
+        """Return manager's transfer history."""
+        log.info("Fetching manager transfers for id=%d", manager_id)
+        return self._get(f"{BASE_URL}/entry/{manager_id}/transfers/")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

@@ -168,3 +168,83 @@ class PlayerHistory:
             bps=d.get("bps", 0),
             value=d.get("value", 0),
         )
+
+
+@dataclass
+class ManagerProfile:
+    """User's FPL manager profile information."""
+    manager_id: int
+    name: str
+    team_name: str
+    team_value: int        # in 0.1 £ units (e.g., 1050 → £105.0m)
+    bank: int              # in 0.1 £ units
+    total_points: int
+    rank: int | None
+    season: int            # e.g., 2024 for 2024-25 season
+
+    @classmethod
+    def from_dict(cls, manager_id: int, d: dict) -> "ManagerProfile":
+        manager_name = f"{d.get('player_first_name', '')} {d.get('player_last_name', '')}".strip()
+        return cls(
+            manager_id=manager_id,
+            name=manager_name,
+            team_name=d.get("name", ""),
+            team_value=d.get("last_deadline_value", 0),
+            bank=d.get("last_deadline_bank", 0),
+            total_points=d.get("summary_overall_points", 0),
+            rank=d.get("summary_overall_rank"),
+            season=d.get("current_event", 1),
+        )
+
+
+@dataclass
+class ManagerTeamPick:
+    """A single player picked in a manager's team for a gameweek."""
+    manager_id: int
+    season: int
+    gameweek: int
+    player_id: int
+    position: int          # 1=GK, 2=DEF, 3=MID, 4=FWD (squad position in team sheet)
+    is_captain: bool
+    is_vice_captain: bool
+    points: int
+    multiplier: int        # 1x (auto), 2x (captain), 0x (benched)
+
+
+@dataclass
+class Transfer:
+    """A transfer made by the manager."""
+    manager_id: int
+    season: int
+    gameweek: int
+    player_out_id: int
+    player_in_id: int
+    entry_cost: int        # cost in 0.1 £ units
+    cost_change_event: int # cumulative change for this player
+
+
+@dataclass
+class ManagerHistory:
+    """Season-level history for a manager."""
+    manager_id: int
+    season: int
+    total_points: int
+    rank: int | None
+    transfers_used: int
+    finished: bool         # True if season is complete
+
+
+@dataclass
+class ManagerSeason:
+    """Tracks which seasons are available for a manager."""
+    manager_id: int
+    season: int
+    status: str            # "active" or "completed"
+
+    @classmethod
+    def from_dict(cls, manager_id: int, season: int, d: dict) -> "ManagerSeason":
+        return cls(
+            manager_id=manager_id,
+            season=season,
+            status="completed" if d.get("finished", False) else "active",
+        )

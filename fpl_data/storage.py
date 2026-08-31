@@ -8,9 +8,21 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fpl_data.models import Fixture, Gameweek, Player, PlayerHistory, Team
+from fpl_data.models import (
+    Fixture, Gameweek, Player, PlayerHistory, Team,
+    ManagerProfile, ManagerTeamPick, Transfer, ManagerHistory, ManagerSeason,
+)
 
 log = logging.getLogger(__name__)
+
+
+def migrate_db(db_path: Path) -> None:
+    """Apply any missing schema changes to an existing DB."""
+    con = sqlite3.connect(str(db_path))
+    con.executescript(_SCHEMA)
+    con.commit()
+    con.close()
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS teams (
@@ -87,6 +99,58 @@ CREATE TABLE IF NOT EXISTS player_history (
     bps             INTEGER,
     value           INTEGER,
     PRIMARY KEY (player_id, fixture)
+);
+
+CREATE TABLE IF NOT EXISTS user_profile (
+    manager_id              INTEGER PRIMARY KEY,
+    name                    TEXT,
+    team_name               TEXT,
+    team_value              INTEGER,
+    bank                    INTEGER,
+    total_points            INTEGER,
+    rank                    INTEGER,
+    season                  INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS user_team (
+    manager_id              INTEGER REFERENCES user_profile(manager_id),
+    season                  INTEGER,
+    gameweek                INTEGER,
+    player_id               INTEGER REFERENCES players(id),
+    position                INTEGER,
+    is_captain              INTEGER,
+    is_vice_captain         INTEGER,
+    points                  INTEGER,
+    multiplier              INTEGER,
+    PRIMARY KEY (manager_id, season, gameweek, player_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_transfers (
+    manager_id              INTEGER REFERENCES user_profile(manager_id),
+    season                  INTEGER,
+    gameweek                INTEGER,
+    player_out_id           INTEGER REFERENCES players(id),
+    player_in_id            INTEGER REFERENCES players(id),
+    entry_cost              INTEGER,
+    cost_change_event       INTEGER,
+    PRIMARY KEY (manager_id, season, gameweek, player_out_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_history (
+    manager_id              INTEGER REFERENCES user_profile(manager_id),
+    season                  INTEGER,
+    total_points            INTEGER,
+    rank                    INTEGER,
+    transfers_used          INTEGER,
+    finished                INTEGER,
+    PRIMARY KEY (manager_id, season)
+);
+
+CREATE TABLE IF NOT EXISTS user_seasons (
+    manager_id              INTEGER REFERENCES user_profile(manager_id),
+    season                  INTEGER,
+    status                  TEXT,
+    PRIMARY KEY (manager_id, season)
 );
 """
 
@@ -205,3 +269,67 @@ class Storage:
         )
         self._con.commit()
         log.debug("Upserted %d player_history rows", len(rows))
+
+    def upsert_manager_profile(self, profiles: list[ManagerProfile]) -> None:
+        rows = [
+            (
+                p.manager_id, p.name, p.team_name, p.team_value, p.bank,
+                p.total_points, p.rank, p.season,
+            )
+            for p in profiles
+        ]
+        self._con.executemany(
+            "INSERT OR REPLACE INTO user_profile VALUES (?,?,?,?,?,?,?,?)", rows
+        )
+        self._con.commit()
+        log.info("Upserted %d manager profiles", len(rows))
+
+    def upsert_manager_team(self, picks: list[ManagerTeamPick]) -> None:
+        rows = [
+            (
+                p.manager_id, p.season, p.gameweek, p.player_id, p.position,
+                int(p.is_captain), int(p.is_vice_captain), p.points, p.multiplier,
+            )
+            for p in picks
+        ]
+        self._con.executemany(
+            "INSERT OR REPLACE INTO user_team VALUES (?,?,?,?,?,?,?,?,?)", rows
+        )
+        self._con.commit()
+        log.debug("Upserted %d manager team picks", len(rows))
+
+    def upsert_manager_transfers(self, transfers: list[Transfer]) -> None:
+        rows = [
+            (
+                t.manager_id, t.season, t.gameweek, t.player_out_id,
+                t.player_in_id, t.entry_cost, t.cost_change_event,
+            )
+            for t in transfers
+        ]
+        self._con.executemany(
+            "INSERT OR REPLACE INTO user_transfers VALUES (?,?,?,?,?,?,?)", rows
+        )
+        self._con.commit()
+        log.debug("Upserted %d manager transfers", len(rows))
+
+    def upsert_manager_history(self, histories: list[ManagerHistory]) -> None:
+        rows = [
+            (
+                h.manager_id, h.season, h.total_points, h.rank,
+                h.transfers_used, int(h.finished),
+            )
+            for h in histories
+        ]
+        self._con.executemany(
+            "INSERT OR REPLACE INTO user_history VALUES (?,?,?,?,?,?)", rows
+        )
+        self._con.commit()
+        log.info("Upserted %d manager history records", len(rows))
+
+    def upsert_manager_seasons(self, seasons: list[ManagerSeason]) -> None:
+        rows = [(s.manager_id, s.season, s.status) for s in seasons]
+        self._con.executemany(
+            "INSERT OR REPLACE INTO user_seasons VALUES (?,?,?)", rows
+        )
+        self._con.commit()
+        log.debug("Upserted %d manager season records", len(rows))
