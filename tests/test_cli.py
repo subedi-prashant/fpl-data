@@ -57,7 +57,8 @@ def test_fetch_fixtures(tmp_path: Path) -> None:
 
 
 @rsps_lib.activate
-def test_fetch_all(tmp_path: Path) -> None:
+def test_fetch_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FPL_MANAGER_ID", raising=False)
     _register_all_mocks()
     result = runner.invoke(
         app, ["fetch-all", "--data-dir", str(tmp_path), "--cache-ttl", "0"]
