@@ -8,6 +8,8 @@ Works in two modes:
 
 from __future__ import annotations
 
+import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -19,15 +21,12 @@ _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from fpl_data.analysis import (
-    load_manager_history,
-    load_manager_picks,
-    load_manager_profile,
-    transfer_quality_analysis,
-    captaincy_analysis,
-    bench_impact,
-    vs_average_performance,
-    optimal_team_suggestion,
+from dashboard.components import formation_label, render_pitch
+from fpl_data.recommendations import (
+    calculate_selling_price,
+    infer_purchase_prices,
+    recommend_transfers,
+    validate_squad,
 )
 
 # ---------------------------------------------------------------------------
@@ -35,35 +34,34 @@ from fpl_data.analysis import (
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="My FPL",
-    page_icon="⚽",
+    page_title="My FPL · Transfer planner",
+    page_icon=":material/sports_soccer:",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 _DB_PATH = _ROOT / "data" / "fpl.db"
 _POSITION_MAP = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
-_STATUS_LABEL = {"a": "✅ Available", "d": "🟡 Doubtful", "i": "🔴 Injured", "u": "⬛ Unavailable", "s": "🔵 Suspended"}
+_STATUS_LABEL = {"a": "Available", "d": "Doubtful", "i": "Injured", "u": "Unavailable", "s": "Suspended"}
 
 # ---------------------------------------------------------------------------
 # Custom CSS — tighten spacing and style section headers
 # ---------------------------------------------------------------------------
 
-st.markdown("""
+st.html("""
 <style>
-[data-testid="stSidebar"] .stMarkdown h3 { font-size: 0.78rem; text-transform: uppercase;
-    letter-spacing: 0.08em; color: #888; margin: 1rem 0 0.3rem; }
-[data-testid="stSidebar"] hr { margin: 0.4rem 0; border-color: #333; }
-div[data-testid="metric-container"] { background: #1e1e2e; border-radius: 8px;
-    padding: 0.8rem 1rem; border: 1px solid #2d2d3d; }
+.st-key-sidebar-brand { padding: .25rem 0 .6rem; }
+.st-key-sidebar-brand p { margin: 0; color: rgba(255,255,255,.7); }
+.st-key-manager-summary { padding: .15rem 0; }
+.st-key-primary-recommendation { border-left: 4px solid #008a55; }
 </style>
-""", unsafe_allow_html=True)
+""")
 
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching FPL data…")
+@st.cache_data(ttl=15 * 60, show_spinner="Fetching FPL data…")
 def _fetch_bootstrap() -> dict:
     r = requests.get(
         "https://fantasy.premierleague.com/api/bootstrap-static/",
@@ -74,7 +72,7 @@ def _fetch_bootstrap() -> dict:
     return r.json()
 
 
-@st.cache_data(ttl=6 * 3600, show_spinner="Fetching fixtures…")
+@st.cache_data(ttl=15 * 60, show_spinner="Fetching fixtures…")
 def _fetch_fixtures() -> list[dict]:
     r = requests.get(
         "https://fantasy.premierleague.com/api/fixtures/",
@@ -85,6 +83,50 @@ def _fetch_fixtures() -> list[dict]:
     return r.json()
 
 
+@st.cache_data(ttl=15 * 60, max_entries=100, show_spinner=False)
+def _fetch_manager_profile(manager_id: int) -> dict:
+    response = requests.get(
+        f"https://fantasy.premierleague.com/api/entry/{manager_id}/",
+        headers={"User-Agent": "fpl-data-dashboard/0.1"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@st.cache_data(ttl=15 * 60, max_entries=100, show_spinner=False)
+def _fetch_manager_picks(manager_id: int, gameweek: int) -> dict:
+    response = requests.get(
+        f"https://fantasy.premierleague.com/api/entry/{manager_id}/event/{gameweek}/picks/",
+        headers={"User-Agent": "fpl-data-dashboard/0.1"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@st.cache_data(ttl=15 * 60, max_entries=100, show_spinner=False)
+def _fetch_manager_transfers(manager_id: int) -> list[dict]:
+    response = requests.get(
+        f"https://fantasy.premierleague.com/api/entry/{manager_id}/transfers/",
+        headers={"User-Agent": "fpl-data-dashboard/0.1"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+@st.cache_data(ttl=15 * 60, max_entries=100, show_spinner=False)
+def _fetch_manager_history(manager_id: int) -> dict:
+    response = requests.get(
+        f"https://fantasy.premierleague.com/api/entry/{manager_id}/history/",
+        headers={"User-Agent": "fpl-data-dashboard/0.1"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def _build_players_df(bootstrap: dict) -> pd.DataFrame:
     teams = {t["id"]: t for t in bootstrap["teams"]}
     rows = []
@@ -93,11 +135,16 @@ def _build_players_df(bootstrap: dict) -> pd.DataFrame:
         rows.append({
             "id": p["id"],
             "web_name": p["web_name"],
+            "team_id": p["team"],
             "team": t.get("name", ""),
             "team_short": t.get("short_name", ""),
             "position": _POSITION_MAP.get(p["element_type"], "?"),
+            "element_type": p["element_type"],
+            "now_cost": p["now_cost"],
+            "cost_change_start": p.get("cost_change_start", 0),
             "cost_m": p["now_cost"] / 10.0,
             "total_points": p["total_points"],
+            "event_points": p.get("event_points", 0),
             "minutes": p.get("minutes", 0),
             "goals_scored": p.get("goals_scored", 0),
             "assists": p.get("assists", 0),
@@ -105,7 +152,10 @@ def _build_players_df(bootstrap: dict) -> pd.DataFrame:
             "selected_pct": float(p.get("selected_by_percent", 0)),
             "form": float(p.get("form", 0)),
             "ppg": float(p.get("points_per_game", 0)),
+            "ep_next": float(p.get("ep_next") or 0),
             "status": p.get("status", "a"),
+            "chance_of_playing": p.get("chance_of_playing_next_round"),
+            "news": p.get("news", ""),
         })
     df = pd.DataFrame(rows)
     df["value"] = (df["total_points"] / df["cost_m"]).round(1)
@@ -118,9 +168,12 @@ def _build_fixtures_df(raw: list[dict], teams: dict) -> pd.DataFrame:
         th = teams.get(f["team_h"], {})
         ta = teams.get(f["team_a"], {})
         rows.append({
+            "event": f.get("event"),
             "gw": f.get("event"),
+            "team_h_id": f["team_h"],
             "team_h": th.get("name", ""),
             "team_h_short": th.get("short_name", ""),
+            "team_a_id": f["team_a"],
             "team_a": ta.get("name", ""),
             "team_a_short": ta.get("short_name", ""),
             "team_h_difficulty": f.get("team_h_difficulty", 0),
@@ -201,88 +254,197 @@ else:
 # Manager data helpers (only when DB is available)
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=6 * 3600)
+@st.cache_data(ttl=15 * 60, max_entries=100)
 def _get_manager_profile(mid: int) -> dict | None:
-    return load_manager_profile(_DB_PATH, mid) if _USE_DB else None
+    raw_profile = _fetch_manager_profile(mid)
+    manager_name = f"{raw_profile.get('player_first_name', '')} {raw_profile.get('player_last_name', '')}".strip()
+    return {
+        "manager_id": mid,
+        "name": manager_name,
+        "team_name": raw_profile.get("name", "Unnamed team"),
+        "team_value": raw_profile.get("last_deadline_value", 0) / 10,
+        "bank": raw_profile.get("last_deadline_bank", 0) / 10,
+        "bank_units": int(raw_profile.get("last_deadline_bank", 0)),
+        "total_points": int(raw_profile.get("summary_overall_points", 0)),
+        "event_points": int(raw_profile.get("summary_event_points", 0)),
+        "rank": raw_profile.get("summary_overall_rank"),
+        "current_event": int(raw_profile.get("current_event") or 0),
+    }
 
 
-@st.cache_data(ttl=6 * 3600)
-def _get_manager_seasons(mid: int) -> list[int]:
-    if not _USE_DB:
-        return []
-    hist = load_manager_history(_DB_PATH, mid)
-    return sorted(hist["season"].unique().tolist(), reverse=True) if not hist.empty else []
+def _default_manager_id() -> int:
+    env_manager_id = os.getenv("FPL_MANAGER_ID", "").strip()
+    if env_manager_id.isdigit():
+        return int(env_manager_id)
+    for db_path in [_DB_PATH, _ROOT.parent / "data" / "fpl.db"]:
+        if not db_path.exists():
+            continue
+        try:
+            with sqlite3.connect(str(db_path)) as connection:
+                row = connection.execute("SELECT manager_id FROM user_profile ORDER BY manager_id LIMIT 1").fetchone()
+            if row:
+                return int(row[0])
+        except sqlite3.Error:
+            continue
+    return 0
+
+
+def _build_manager_squad(
+    players: pd.DataFrame,
+    picks_payload: dict,
+    transfers: list[dict],
+    history_payload: dict,
+) -> pd.DataFrame:
+    picks = pd.DataFrame(picks_payload.get("picks", []))
+    if picks.empty:
+        return picks
+    picks = picks.rename(columns={"element": "id", "position": "squad_pos"})
+    picks = picks[["id", "squad_pos", "is_captain", "is_vice_captain", "multiplier"]]
+    squad = picks.merge(players, on="id", how="left", validate="one_to_one")
+    ignored_events = {
+        int(chip["event"])
+        for chip in history_payload.get("chips", [])
+        if chip.get("name") == "freehit"
+    }
+    purchase_prices = infer_purchase_prices(squad["id"], players, transfers, ignored_events)
+    squad["purchase_cost"] = squad["id"].map(purchase_prices).astype(int)
+    squad["selling_price"] = squad.apply(
+        lambda player: calculate_selling_price(player["now_cost"], player["purchase_cost"]),
+        axis=1,
+    )
+    return squad.sort_values("squad_pos").reset_index(drop=True)
+
+
+def _next_gameweek(gameweeks: pd.DataFrame, current_gameweek: int) -> int:
+    next_rows = gameweeks[gameweeks["is_next"] == True]
+    if not next_rows.empty:
+        return int(next_rows.iloc[0]["id"])
+    return min(38, current_gameweek + 1)
+
+
+def _fixture_run(fixtures: pd.DataFrame, team_id: int, first_gameweek: int, horizon: int) -> str:
+    labels = []
+    for gameweek in range(first_gameweek, first_gameweek + horizon):
+        home = fixtures[(fixtures["gw"] == gameweek) & (fixtures["team_h_id"] == team_id)]
+        away = fixtures[(fixtures["gw"] == gameweek) & (fixtures["team_a_id"] == team_id)]
+        gameweek_labels = [f"{row['team_a_short']} (H)" for _, row in home.iterrows()]
+        gameweek_labels.extend(f"{row['team_h_short']} (A)" for _, row in away.iterrows())
+        labels.append(" + ".join(gameweek_labels) if gameweek_labels else "—")
+    return " · ".join(labels)
 
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
-st.sidebar.title("⚽ My FPL")
+with st.sidebar.container(key="sidebar-brand"):
+    st.title("My FPL")
+    st.caption("Your squad. Your budget. Better transfers.")
 
 # ── League Data ──────────────────────────────────────────────────────────────
-st.sidebar.markdown("### 🌐 League Data")
-league_page = st.sidebar.radio(
-    "league_nav",
-    ["Overview", "Player Explorer", "Best Value", "Form Table", "Fixture Difficulty"],
-    label_visibility="collapsed",
-)
+st.session_state.setdefault("manager_id", _default_manager_id())
+with st.sidebar.form("manager_lookup", border=False):
+    raw_mid = st.text_input(
+        "Manager ID",
+        value=str(st.session_state.manager_id or ""),
+        placeholder="e.g. 7540623",
+        help="Find the number in your public FPL team URL.",
+    )
+    submitted_manager = st.form_submit_button(
+        "Load team",
+        icon=":material/download:",
+        type="primary",
+        width="stretch",
+    )
+if submitted_manager:
+    st.session_state.manager_id = int(raw_mid) if raw_mid.strip().isdigit() else 0
+manager_id = int(st.session_state.manager_id or 0)
+has_manager = manager_id > 0
 
 # ── My FPL ───────────────────────────────────────────────────────────────────
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 👤 My FPL")
-
-raw_mid = st.sidebar.text_input(
-    "Manager ID",
-    placeholder="e.g. 7540623",
-    help="Find your ID in your FPL profile URL: fantasy.premierleague.com/entry/**ID**/",
-)
-manager_id = int(raw_mid) if raw_mid.strip().isdigit() else 0
-has_manager = manager_id > 0 and _USE_DB
-
 manager_profile: dict | None = None
 season: int | None = None
-
 if has_manager:
-    manager_profile = _get_manager_profile(manager_id)
-    available_seasons = _get_manager_seasons(manager_id)
+    try:
+        manager_profile = _get_manager_profile(manager_id)
+    except requests.RequestException:
+        manager_profile = None
 
-    if manager_profile and available_seasons:
-        # Inline status chip
-        rank_str = f"#{manager_profile['rank']:,}" if manager_profile["rank"] else "Unranked"
-        st.sidebar.success(f"**{manager_profile['team_name']}** · {rank_str}")
-        season = st.sidebar.selectbox("Season", available_seasons, index=0)
-        personal_page = st.sidebar.radio(
-            "my_fpl_nav",
-            ["My Season", "My Decisions", "Recommendations"],
-            label_visibility="collapsed",
-        )
-    else:
-        st.sidebar.warning("No data found — run `fpl-data fetch-manager` first.")
-        personal_page = None
-elif manager_id > 0 and not _USE_DB:
-    st.sidebar.info("Personal data requires a local DB. Run `fpl-data fetch-all` first.")
-    personal_page = None
+if manager_profile:
+    # Inline status chip
+    rank_str = f"#{manager_profile['rank']:,}" if manager_profile["rank"] else "Unranked"
+    with st.sidebar.container(border=True, key="manager-summary"):
+        st.markdown(f"**{manager_profile['team_name']}**")
+        st.caption(f"{manager_profile['name']} · {rank_str}")
+elif has_manager:
+    st.sidebar.error("That public manager ID could not be loaded.", icon=":material/error:")
+
+workspace = st.sidebar.radio(
+    "Navigation",
+    ["Recommendations", "My Season", "My Decisions", "League Data"],
+    format_func=lambda page: {
+        "Recommendations": ":material/swap_horiz: Transfer planner",
+        "My Season": ":material/groups: My team",
+        "My Decisions": ":material/query_stats: Decision review",
+        "League Data": ":material/table_chart: League data",
+    }[page],
+)
+personal_page = workspace if workspace != "League Data" else None
+
+if workspace == "League Data":
+    league_page = st.sidebar.radio(
+        "League view",
+        ["Overview", "Player Explorer", "Best Value", "Form Table", "Fixture Difficulty"],
+    )
 else:
-    personal_page = None
+    league_page = "Overview"
 
 # Determine active section: personal pages take over when selected
-active_section = "personal" if (personal_page and manager_profile) else "league"
+active_section = "league" if workspace == "League Data" else "personal" if manager_profile else "setup"
 
-st.sidebar.markdown("---")
-if st.sidebar.button("🔄 Refresh data"):
+if st.sidebar.button("Refresh data", icon=":material/refresh:", width="stretch"):
     st.cache_data.clear()
     st.rerun()
-st.sidebar.caption(f"Source: {'Local DB' if _USE_DB else 'Live API'}")
+st.sidebar.caption("Public FPL data · cached for 15 minutes")
 
 # ---------------------------------------------------------------------------
 # Load public data
 # ---------------------------------------------------------------------------
 
-players_df = get_players_df()
-fixtures_df = get_fixtures_df()
-gameweeks_df = get_gameweeks_df()
+if active_section == "personal":
+    live_bootstrap = _fetch_bootstrap()
+    live_teams = {team["id"]: team for team in live_bootstrap["teams"]}
+    players_df = _build_players_df(live_bootstrap)
+    fixtures_df = _build_fixtures_df(_fetch_fixtures(), live_teams)
+    gameweeks_df = pd.DataFrame(live_bootstrap["events"])
+else:
+    players_df = get_players_df()
+    fixtures_df = get_fixtures_df()
+    gameweeks_df = get_gameweeks_df()
 current_gw = get_current_gw(gameweeks_df)
+next_gw = _next_gameweek(gameweeks_df, current_gw)
+season = int(str(gameweeks_df.iloc[0]["deadline_time"])[:4]) if not gameweeks_df.empty else None
+manager_gameweek = (manager_profile["current_event"] or current_gw) if manager_profile else current_gw
+manager_picks: dict = {}
+manager_history: dict = {}
+manager_transfers: list[dict] = []
+manager_squad = pd.DataFrame()
+squad_error = ""
+if active_section == "personal" and manager_profile:
+    try:
+        manager_picks = _fetch_manager_picks(manager_id, manager_gameweek)
+        manager_history = _fetch_manager_history(manager_id)
+        manager_transfers = _fetch_manager_transfers(manager_id)
+        manager_squad = _build_manager_squad(players_df, manager_picks, manager_transfers, manager_history)
+        manager_squad["next_fixture"] = manager_squad["team_id"].map(
+            lambda team_id: _fixture_run(fixtures_df, int(team_id), next_gw, 1)
+        )
+        entry_history = manager_picks.get("entry_history", {})
+        manager_profile["bank_units"] = int(entry_history.get("bank", manager_profile["bank_units"]))
+        manager_profile["bank"] = manager_profile["bank_units"] / 10
+        manager_profile["event_points"] = int(entry_history.get("points", manager_profile["event_points"]))
+    except (requests.RequestException, KeyError, ValueError) as error:
+        squad_error = str(error)
 
 
 # ---------------------------------------------------------------------------
@@ -291,14 +453,13 @@ current_gw = get_current_gw(gameweeks_df)
 
 def _manager_banner(profile: dict, gw: int) -> None:
     """Sticky profile strip shown at the top of every personal page."""
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.markdown(f"**{profile['team_name']}**  \n*{profile['name']}*")
-    c2.metric("GW", gw)
-    c3.metric("Season Pts", profile["total_points"])
+    st.title(profile["team_name"])
+    st.caption(f"{profile['name']} · Gameweek {gw}: {profile['event_points']} pts · {profile['total_points']:,} total points")
     rank_disp = f"{profile['rank']:,}" if profile["rank"] else "—"
-    c4.metric("Overall Rank", rank_disp)
-    c5.metric("Team Value", f"£{profile['team_value']:.1f}m")
-    st.markdown("---")
+    with st.container(horizontal=True):
+        st.metric("Overall rank", rank_disp, border=True)
+        st.metric("Team value", f"£{profile['team_value']:.1f}m", border=True)
+        st.metric("In the bank", f"£{profile['bank']:.1f}m", border=True)
 
 
 def _status_badge(s: str) -> str:
@@ -309,24 +470,30 @@ def _status_badge(s: str) -> str:
 # ══ LEAGUE PAGES ════════════════════════════════════════════════════════════
 # ---------------------------------------------------------------------------
 
-if active_section == "league":
+if active_section == "setup":
+    st.title("Make the next transfer count")
+    st.write("Enter your public FPL manager ID in the sidebar to load your current squad and budget.")
+    st.info("No FPL login is required. Only public team data is read.", icon=":material/lock_open:")
+    with st.container(border=True):
+        st.subheader("Built for transfer decisions")
+        st.markdown("- Uses the outgoing player's **actual FPL sale value**, not market price\n- Adds your current **money in the bank**\n- Preserves position quotas and the **three-player club limit**\n- Ranks affordable replacements over the upcoming fixtures")
+
+elif active_section == "league":
 
     # ── Overview ─────────────────────────────────────────────────────────────
     if league_page == "Overview":
-        st.title("⚽ FPL Dashboard")
-        st.caption(f"2025-26 Premier League season · Gameweek {current_gw}")
+        st.title("FPL dashboard")
+        st.caption(f"{season}/{str(season + 1)[-2:]} Premier League · Gameweek {current_gw}")
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Players", f"{len(players_df):,}")
-        c2.metric("Teams", players_df["team"].nunique())
-        c3.metric("Fixtures", f"{len(fixtures_df):,}")
-        c4.metric("Current GW", current_gw)
-
-        st.markdown("---")
+        c1.metric("Players", f"{len(players_df):,}", border=True)
+        c2.metric("Teams", players_df["team"].nunique(), border=True)
+        c3.metric("Fixtures", f"{len(fixtures_df):,}", border=True)
+        c4.metric("Current GW", current_gw, border=True)
 
         col_l, col_r = st.columns([3, 2])
         with col_l:
-            st.subheader("🏆 Top 10 by Total Points")
+            st.subheader("Top players by total points")
             top10 = (
                 players_df.sort_values("total_points", ascending=False)
                 .head(10)[["web_name", "team", "position", "cost_m", "total_points", "form", "value"]]
@@ -335,7 +502,7 @@ if active_section == "league":
             top10.index += 1
             st.dataframe(
                 top10,
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     "web_name": st.column_config.TextColumn("Player"),
                     "team": st.column_config.TextColumn("Team"),
@@ -348,16 +515,16 @@ if active_section == "league":
             )
 
         with col_r:
-            st.subheader("📊 Avg Points by Position")
+            st.subheader("Average points by position")
             pos_stats = (
                 players_df.groupby("position")["total_points"].mean().round(1).reset_index()
             )
             pos_stats.columns = ["Position", "Avg Points"]
-            st.bar_chart(pos_stats.set_index("Position"))
+            st.bar_chart(pos_stats, x="Position", y="Avg Points")
 
     # ── Player Explorer ───────────────────────────────────────────────────────
     elif league_page == "Player Explorer":
-        st.title("📊 Player Explorer")
+        st.title("Player explorer")
 
         f1, f2, f3, f4 = st.columns(4)
         with f1:
@@ -392,7 +559,7 @@ if active_section == "league":
         st.caption(f"{len(filtered)} players")
         st.dataframe(
             filtered[["web_name", "team", "position", "cost_m", "total_points", "form", "ppg", "goals_scored", "assists", "clean_sheets", "value", "selected_pct", "status"]],
-            use_container_width=True,
+            width="stretch",
             height=580,
             column_config={
                 "web_name": st.column_config.TextColumn("Player"),
@@ -413,7 +580,7 @@ if active_section == "league":
 
     # ── Best Value ────────────────────────────────────────────────────────────
     elif league_page == "Best Value":
-        st.title("💎 Best Value Players")
+        st.title("Best value players")
         st.caption("Value = Total Points ÷ Cost (£m)")
 
         c1, c2 = st.columns(2)
@@ -432,7 +599,7 @@ if active_section == "league":
         with col_l:
             st.dataframe(
                 df[["web_name", "team", "position", "cost_m", "total_points", "value", "form", "status"]],
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     "web_name": st.column_config.TextColumn("Player"),
                     "team": st.column_config.TextColumn("Team"),
@@ -450,7 +617,7 @@ if active_section == "league":
 
     # ── Form Table ────────────────────────────────────────────────────────────
     elif league_page == "Form Table":
-        st.title("🔥 In-Form Players")
+        st.title("In-form players")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -469,7 +636,7 @@ if active_section == "league":
 
         st.dataframe(
             df[["web_name", "team", "position", "cost_m", "form", "ppg", "total_points", "goals_scored", "assists", "status"]],
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "web_name": st.column_config.TextColumn("Player"),
                 "team": st.column_config.TextColumn("Team"),
@@ -486,7 +653,7 @@ if active_section == "league":
 
     # ── Fixture Difficulty ────────────────────────────────────────────────────
     elif league_page == "Fixture Difficulty":
-        st.title("📅 Fixture Difficulty")
+        st.title("Fixture difficulty")
         st.caption("Difficulty rating 1 (easiest) → 5 (hardest), from each team's perspective.")
 
         next_n = st.slider("Gameweeks ahead", 3, 10, 6)
@@ -498,15 +665,15 @@ if active_section == "league":
             gw_cols = [c for c in heatmap.columns if c.startswith("GW")]
 
             def _diff_color(val: float) -> str:
-                colors = {1: "#2ecc71", 2: "#a8d8a8", 3: "#f0e68c", 4: "#f39c12", 5: "#e74c3c"}
-                return f"background-color: {colors.get(int(val), '#fff')}; color: #111"
+                colors = {1: "#2f9e6f", 2: "#9bd3b7", 3: "#f2d675", 4: "#e69a55", 5: "#c94a57"}
+                return "background-color: #f4f2f5; color: #777" if pd.isna(val) else f"background-color: {colors.get(int(val), '#fff')}; color: #111"
 
             st.dataframe(
-                heatmap.style.applymap(_diff_color, subset=gw_cols),
-                use_container_width=True,
+                heatmap.style.map(_diff_color, subset=gw_cols),
+                width="stretch",
                 height=700,
             )
-            st.caption("🟢 1 Easy   🟡 3 Medium   🔴 5 Hard")
+            st.caption("1 easy · 3 medium · 5 hard")
 
 
 # ---------------------------------------------------------------------------
@@ -515,215 +682,236 @@ if active_section == "league":
 
 elif active_section == "personal" and manager_profile and season:
 
-    _manager_banner(manager_profile, current_gw)
+    _manager_banner(manager_profile, manager_gameweek)
 
     # ── My Season ─────────────────────────────────────────────────────────────
     if personal_page == "My Season":
-        st.header("📋 My Season")
+        st.header("Current team")
+        st.caption(f"Your latest public selection from Gameweek {manager_gameweek}. Sale values include FPL's profit rule.")
 
-        tab_profile, tab_history, tab_bench_mark = st.tabs(["Profile", "Season History", "Benchmarking"])
+        if squad_error:
+            st.error("The current squad could not be loaded from FPL.", icon=":material/error:")
+        elif manager_squad.empty:
+            st.warning("No public picks are available for this manager yet.", icon=":material/warning:")
+        else:
+            squad_checks = validate_squad(manager_squad)
+            if not all(squad_checks.values()):
+                st.warning("FPL returned an incomplete or invalid 15-player squad.", icon=":material/warning:")
+            st.html(render_pitch(manager_squad, manager_gameweek))
 
-        with tab_profile:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Points", manager_profile["total_points"])
-            rank_disp = f"{manager_profile['rank']:,}" if manager_profile["rank"] else "—"
-            c2.metric("Overall Rank", rank_disp)
-            c3.metric("Team Value", f"£{manager_profile['team_value']:.1f}m")
-            c4.metric("Bank", f"£{manager_profile['bank']:.1f}m")
-
-        with tab_history:
-            hist = load_manager_history(_DB_PATH, manager_id)
-            if hist.empty:
-                st.info("No season history found.")
-            else:
-                st.dataframe(
-                    hist[["season", "total_points", "rank", "transfers_used", "finished"]],
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "season": st.column_config.NumberColumn("Season", format="%d"),
-                        "total_points": st.column_config.NumberColumn("Points"),
-                        "rank": st.column_config.NumberColumn("Final Rank"),
-                        "transfers_used": st.column_config.NumberColumn("Transfers"),
-                        "finished": st.column_config.CheckboxColumn("Completed"),
-                    },
-                )
-                st.line_chart(hist.set_index("season")["total_points"])
-
-        with tab_bench_mark:
-            perf = vs_average_performance(_DB_PATH, manager_id, season)
-            if not perf:
-                st.info("Not enough data for benchmarking yet.")
-            else:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Your Points", perf["manager_points"])
-                c2.metric("League Average", f"{perf['league_avg_points']:.0f}")
-                delta = perf["points_above_average"]
-                c3.metric("vs Average", f"{delta:+.0f} pts", delta_color="normal")
-                if perf.get("estimated_rank_percentile"):
-                    st.info(f"📍 You're in the **top {perf['estimated_rank_percentile']:.1f}%** of all managers (est.)")
-                comp = pd.DataFrame({
-                    "Category": ["Your Points", "League Avg"],
-                    "Points": [perf["manager_points"], perf["league_avg_points"]],
-                })
-                st.bar_chart(comp.set_index("Category"))
+            st.subheader("Squad details")
+            squad_details = manager_squad.copy()
+            squad_details["player"] = squad_details.apply(
+                lambda player: f"{player['web_name']} (C)" if player["is_captain"] else f"{player['web_name']} (V)" if player["is_vice_captain"] else player["web_name"],
+                axis=1,
+            )
+            squad_details["role"] = squad_details["squad_pos"].map(lambda squad_position: "Starting XI" if squad_position <= 11 else f"Bench {squad_position - 11}")
+            squad_details["current_price"] = squad_details["now_cost"] / 10
+            squad_details["sale_price"] = squad_details["selling_price"] / 10
+            squad_details["availability"] = squad_details["status"].map(_status_badge)
+            st.dataframe(
+                squad_details[["player", "team_short", "position", "role", "event_points", "current_price", "sale_price", "next_fixture", "availability"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "player": st.column_config.TextColumn("Player", pinned=True),
+                    "team_short": st.column_config.TextColumn("Club"),
+                    "position": st.column_config.TextColumn("Pos."),
+                    "role": st.column_config.TextColumn("Line-up"),
+                    "event_points": st.column_config.NumberColumn(f"GW{manager_gameweek} pts"),
+                    "current_price": st.column_config.NumberColumn("Market price", format="£%.1fm"),
+                    "sale_price": st.column_config.NumberColumn("Your sale price", format="£%.1fm"),
+                    "next_fixture": st.column_config.TextColumn(f"GW{next_gw}"),
+                    "availability": st.column_config.TextColumn("Status"),
+                },
+            )
 
     # ── My Decisions ──────────────────────────────────────────────────────────
     elif personal_page == "My Decisions":
-        st.header("⚡ My Decisions")
+        st.header("Decision review")
+        st.caption("Public gameweek history and completed transfers for this season.")
 
-        tab_picks, tab_transfers, tab_capt, tab_bench = st.tabs(
-            ["My Picks", "Transfers", "Captaincy", "Bench"]
-        )
+        current_history = pd.DataFrame(manager_history.get("current", []))
+        if current_history.empty:
+            st.info("No gameweek history is available yet.", icon=":material/info:")
+        else:
+            total_transfers = int(current_history["event_transfers"].sum())
+            hit_points = int(current_history["event_transfers_cost"].sum())
+            bench_points = int(current_history["points_on_bench"].sum())
+            with st.container(horizontal=True):
+                st.metric("Transfers", total_transfers, border=True)
+                st.metric("Points spent", hit_points, border=True)
+                st.metric("Points benched", bench_points, border=True)
+            history_chart = current_history[["event", "points"]].rename(columns={"event": "Gameweek", "points": "Points"})
+            st.line_chart(history_chart.set_index("Gameweek"))
+            history_table = current_history[["event", "points", "total_points", "overall_rank", "bank", "value", "event_transfers", "event_transfers_cost", "points_on_bench"]].copy()
+            history_table["bank"] = history_table["bank"] / 10
+            history_table["value"] = history_table["value"] / 10
+            st.dataframe(
+                history_table,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "event": st.column_config.NumberColumn("GW"),
+                    "points": st.column_config.NumberColumn("Points"),
+                    "total_points": st.column_config.NumberColumn("Total"),
+                    "overall_rank": st.column_config.NumberColumn("Overall rank", format="localized"),
+                    "bank": st.column_config.NumberColumn("Bank", format="£%.1fm"),
+                    "value": st.column_config.NumberColumn("Team value", format="£%.1fm"),
+                    "event_transfers": st.column_config.NumberColumn("Transfers"),
+                    "event_transfers_cost": st.column_config.NumberColumn("Cost"),
+                    "points_on_bench": st.column_config.NumberColumn("Bench pts"),
+                },
+            )
 
-        with tab_picks:
-            picks = load_manager_picks(_DB_PATH, manager_id, season)
-            if picks.empty:
-                st.info("No picks found. Run `fpl-data fetch-manager` to load your team selections.")
-            else:
-                c1, c2 = st.columns([2, 3])
-                with c1:
-                    selected_gw = st.selectbox("Gameweek", sorted(picks["gameweek"].unique()))
-                gw_picks = picks[picks["gameweek"] == selected_gw].sort_values("position")
-                starters = gw_picks[gw_picks["squad_pos"] < 12]
-                bench_p = gw_picks[gw_picks["squad_pos"] >= 12]
-
-                st.markdown(f"**GW{selected_gw} · {len(gw_picks)} players · {int(gw_picks['points'].sum())} pts**")
-                col_xi, col_bench = st.columns(2)
-
-                with col_xi:
-                    st.caption(f"Starting XI ({len(starters)})")
-                    st.dataframe(
-                        starters[["web_name", "team", "is_captain", "is_vice_captain", "points"]],
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "web_name": st.column_config.TextColumn("Player"),
-                            "team": st.column_config.TextColumn("Team"),
-                            "is_captain": st.column_config.CheckboxColumn("©"),
-                            "is_vice_captain": st.column_config.CheckboxColumn("vc"),
-                            "points": st.column_config.NumberColumn("Pts"),
-                        },
-                    )
-                with col_bench:
-                    st.caption(f"Bench ({len(bench_p)})")
-                    if not bench_p.empty:
-                        st.dataframe(
-                            bench_p[["web_name", "team", "points"]],
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "web_name": st.column_config.TextColumn("Player"),
-                                "team": st.column_config.TextColumn("Team"),
-                                "points": st.column_config.NumberColumn("Pts"),
-                            },
-                        )
-
-        with tab_transfers:
-            transfers_df = transfer_quality_analysis(_DB_PATH, manager_id, season)
-            if transfers_df.empty:
-                st.info("No transfers found for this season.")
-            else:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Transfers Made", len(transfers_df))
-                c2.metric("Avg Net Gain", f"{transfers_df['net_gain'].mean():+.1f} pts")
-                good = len(transfers_df[transfers_df["quality"] == "Good"])
-                c3.metric("Good Transfers", f"{good}/{len(transfers_df)}")
-                st.markdown("---")
-
-                def _tcolor(val: str) -> str:
-                    return {"Good": "background-color:#1a5c3a;color:#fff",
-                            "Okay": "background-color:#5c4a00;color:#fff",
-                            "Poor": "background-color:#5c1a1a;color:#fff"}.get(val, "")
-
-                disp = transfers_df.copy()
-                disp.columns = ["GW", "Sold", "Bought", "Cost (£)", "Sold 3GW", "Bought 3GW", "Net Pts", "Quality"]
-                st.dataframe(
-                    disp.style.map(_tcolor, subset=["Quality"]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-        with tab_capt:
-            capt_df = captaincy_analysis(_DB_PATH, manager_id, season)
-            if capt_df.empty:
-                st.info("No captaincy data found.")
-            else:
-                optimal = len(capt_df[capt_df["decision_quality"] == "Optimal"])
-                missed_total = int(capt_df["opportunity_cost"].sum())
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Optimal Captains", f"{optimal}/{len(capt_df)}")
-                c2.metric("Points Missed", missed_total)
-                c3.metric("Avg Opp. Cost", f"{capt_df['opportunity_cost'].mean():.1f} pts")
-                st.markdown("---")
-
-                def _ccolor(val: str) -> str:
-                    return "background-color:#1a5c3a;color:#fff" if val == "Optimal" else "background-color:#5c3a00;color:#fff"
-
-                disp = capt_df.copy()
-                disp.columns = ["GW", "Chosen", "Chosen Pts", "Best Option", "Best Pts", "Pts Missed", "Decision"]
-                disp["Pts Missed"] = disp["Pts Missed"].astype(int)
-                st.dataframe(
-                    disp.style.map(_ccolor, subset=["Decision"]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-        with tab_bench:
-            bench_df = bench_impact(_DB_PATH, manager_id, season)
-            if bench_df.empty:
-                st.info("No bench data found.")
-            else:
-                missed_opps = len(bench_df[bench_df["missed_opportunity"] == "Yes"])
-                c1, c2, c3 = st.columns(3)
-                c1.metric("High-scoring bench GWs", missed_opps)
-                c2.metric("Total bench points", int(bench_df["bench_points"].sum()))
-                c3.metric("Avg best bench score", f"{bench_df['bench_points'].mean():.1f}")
-                st.markdown("---")
-
-                def _bcolor(val: str) -> str:
-                    return "background-color:#5c1a1a;color:#fff" if val == "Yes" else ""
-
-                disp = bench_df.copy()
-                disp.columns = ["GW", "Top Benched", "Pts", "Position", "High Scorer?"]
-                st.dataframe(
-                    disp.style.map(_bcolor, subset=["High Scorer?"]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+        st.subheader("Transfer history")
+        transfer_history = pd.DataFrame(manager_transfers)
+        if transfer_history.empty:
+            st.caption("No completed transfers this season.")
+        else:
+            player_names = players_df.set_index("id")["web_name"].to_dict()
+            transfer_history["sold"] = transfer_history["element_out"].map(player_names)
+            transfer_history["bought"] = transfer_history["element_in"].map(player_names)
+            transfer_history["sale_price"] = transfer_history["element_out_cost"] / 10
+            transfer_history["buy_price"] = transfer_history["element_in_cost"] / 10
+            st.dataframe(
+                transfer_history[["event", "sold", "sale_price", "bought", "buy_price", "time"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "event": st.column_config.NumberColumn("GW"),
+                    "sold": st.column_config.TextColumn("Sold"),
+                    "sale_price": st.column_config.NumberColumn("Sale", format="£%.1fm"),
+                    "bought": st.column_config.TextColumn("Bought"),
+                    "buy_price": st.column_config.NumberColumn("Cost", format="£%.1fm"),
+                    "time": st.column_config.DatetimeColumn("Completed", format="D MMM, HH:mm"),
+                },
+            )
 
     # ── Recommendations ────────────────────────────────────────────────────────
     elif personal_page == "Recommendations":
-        st.header("🤖 Team Recommendations")
-        st.caption("Suggested picks based on form, fixture difficulty and recent points.")
+        st.header("Transfer planner")
+        st.caption("Affordable one-for-one moves from your current 15-player squad. Every result is checked against FPL squad rules.")
 
-        c1, c2 = st.columns(2)
-        with c1:
-            gw_rec = st.slider("Gameweek", 1, 38, current_gw)
-        with c2:
-            budget_rec = st.slider("Budget (£m)", 80.0, 110.0, 100.0, 0.5)
-
-        rec_team = optimal_team_suggestion(_DB_PATH, manager_id, gw_rec, budget_rec)
-        if rec_team.empty:
-            st.warning("Not enough data to generate recommendations yet.")
+        if squad_error:
+            st.error("The current squad could not be loaded from FPL.", icon=":material/error:")
+        elif manager_squad.empty:
+            st.warning("No public picks are available for this manager yet.", icon=":material/warning:")
+        elif not all(validate_squad(manager_squad).values()):
+            st.error("Recommendations are paused because FPL did not return a valid 15-player squad.", icon=":material/error:")
         else:
-            total_cost = rec_team["cost_m"].sum()
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Players", len(rec_team))
-            c2.metric("Total Cost", f"£{total_cost:.1f}m")
-            c3.metric("Budget Left", f"£{budget_rec - total_cost:.1f}m")
-            st.markdown("---")
-            st.dataframe(
-                rec_team,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "web_name": st.column_config.TextColumn("Player"),
-                    "team_short": st.column_config.TextColumn("Team"),
-                    "position": st.column_config.TextColumn("Pos", width="small"),
-                    "cost_m": st.column_config.NumberColumn("Cost", format="£%.1fm"),
-                    "form": st.column_config.NumberColumn("Form", format="%.1f"),
-                    "avg_recent_points": st.column_config.NumberColumn("Recent Avg", format="%.1f"),
-                    "pick_score": st.column_config.ProgressColumn("Score", min_value=0, max_value=20),
-                },
+            control_one, control_two, control_three = st.columns(3)
+            with control_one:
+                horizon = st.segmented_control(
+                    "Projection window",
+                    [3, 5],
+                    default=3,
+                    required=True,
+                    format_func=lambda gameweeks: f"{gameweeks} GWs",
+                    key="projection_horizon",
+                )
+            with control_two:
+                hit_cost = st.segmented_control(
+                    "Transfer cost",
+                    [0, 4],
+                    default=0,
+                    required=True,
+                    format_func=lambda cost: "Free" if cost == 0 else "-4 points",
+                    key="transfer_cost",
+                )
+            with control_three:
+                selected_position = st.selectbox(
+                    "Position",
+                    ["All", "GKP", "DEF", "MID", "FWD"],
+                    key="transfer_position",
+                )
+            include_doubtful = st.toggle("Include players with a 75% chance of playing", value=False, key="include_doubtful")
+
+            outgoing_pool = manager_squad if selected_position == "All" else manager_squad[manager_squad["position"] == selected_position]
+            outgoing_options = [0] + outgoing_pool["id"].astype(int).tolist()
+            outgoing_names = outgoing_pool.set_index("id")["web_name"].to_dict()
+            selected_outgoing = st.selectbox(
+                "Player to replace",
+                outgoing_options,
+                format_func=lambda player_id: "Best move across the squad" if player_id == 0 else outgoing_names[player_id],
+                key="outgoing_player",
             )
+
+            recommendations = recommend_transfers(
+                manager_squad,
+                players_df,
+                fixtures_df,
+                bank=manager_profile["bank_units"],
+                next_gameweek=next_gw,
+                horizon=int(horizon),
+                position=None if selected_position == "All" else selected_position,
+                include_doubtful=include_doubtful,
+            )
+            recommendations["net_gain"] = recommendations["projected_gain"] - int(hit_cost)
+            if selected_outgoing:
+                recommendations = recommendations[recommendations["player_out_id"] == selected_outgoing]
+            else:
+                recommendations = recommendations.drop_duplicates("player_in_id")
+            recommendations = recommendations.sort_values(["net_gain", "player_in_projection"], ascending=False)
+            positive_moves = recommendations[recommendations["net_gain"] > 0].head(8).copy()
+
+            if positive_moves.empty:
+                with st.container(border=True):
+                    st.badge("Best decision", icon=":material/pause_circle:", color="green")
+                    st.subheader("Hold the transfer")
+                    st.write(f"No legal move improves the best starting-XI projection over {int(horizon)} gameweeks after a {int(hit_cost)}-point transfer cost.")
+            else:
+                best_move = positive_moves.iloc[0]
+                outgoing_player = players_df[players_df["id"] == best_move["player_out_id"]].iloc[0]
+                incoming_player = players_df[players_df["id"] == best_move["player_in_id"]].iloc[0]
+                outgoing_fixtures = _fixture_run(fixtures_df, int(outgoing_player["team_id"]), next_gw, int(horizon))
+                incoming_fixtures = _fixture_run(fixtures_df, int(incoming_player["team_id"]), next_gw, int(horizon))
+
+                with st.container(border=True, key="primary-recommendation"):
+                    st.badge("Best available move", icon=":material/recommend:", color="green")
+                    st.subheader(f"{best_move['player_out']} → {best_move['player_in']}")
+                    st.caption(
+                        f"Sell {best_move['team_out']} · {best_move['position']} for £{best_move['selling_price'] / 10:.1f}m  |  "
+                        f"Buy {best_move['team_in']} · {best_move['position']} for £{best_move['incoming_cost'] / 10:.1f}m"
+                    )
+                    st.markdown(
+                        f"**{int(horizon)}-GW starting-XI gain:** :green[**+{best_move['net_gain']:.1f} points**]  ·  "
+                        f"**Bank after:** £{best_move['bank_after'] / 10:.1f}m"
+                    )
+                    st.markdown(f"**{best_move['player_out']} fixtures:** {outgoing_fixtures}  \n**{best_move['player_in']} fixtures:** {incoming_fixtures}")
+                    st.markdown(":green-badge[Same position] :green-badge[Within budget] :green-badge[Max 3 per club] :green-badge[Valid squad shape]")
+                    st.caption(
+                        f"Budget check: £{best_move['selling_price'] / 10:.1f}m sale value + £{manager_profile['bank']:.1f}m bank "
+                        f"= £{best_move['available_budget'] / 10:.1f}m available. {best_move['player_in']} costs £{best_move['incoming_cost'] / 10:.1f}m."
+                    )
+
+                if len(positive_moves) > 1:
+                    st.subheader("Other legal moves")
+                    alternatives = positive_moves.iloc[1:].copy()
+                    alternatives["sale"] = alternatives["selling_price"] / 10
+                    alternatives["cost"] = alternatives["incoming_cost"] / 10
+                    alternatives["bank_left"] = alternatives["bank_after"] / 10
+                    st.dataframe(
+                        alternatives[["player_out", "team_out", "player_in", "team_in", "position", "sale", "cost", "net_gain", "bank_left"]],
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "player_out": st.column_config.TextColumn("Sell", pinned=True),
+                            "team_out": st.column_config.TextColumn("From"),
+                            "player_in": st.column_config.TextColumn("Buy"),
+                            "team_in": st.column_config.TextColumn("Club"),
+                            "position": st.column_config.TextColumn("Pos."),
+                            "sale": st.column_config.NumberColumn("Sale", format="£%.1fm"),
+                            "cost": st.column_config.NumberColumn("Cost", format="£%.1fm"),
+                            "net_gain": st.column_config.NumberColumn("Starting-XI gain", format="%+.1f pts"),
+                            "bank_left": st.column_config.NumberColumn("Bank after", format="£%.1fm"),
+                        },
+                    )
+
+            with st.expander("How recommendations are ranked", icon=":material/calculate:"):
+                st.write("Player projections combine current FPL form (55%), points per game (30%), and FPL's next-gameweek estimate (15%). Official fixture difficulty is applied across the selected window, later gameweeks are discounted by 15%, and season minutes reduce the score of rotation risks. Transfer gain compares the highest-scoring legal starting XI before and after the move.")
+                st.write("Unavailable players are excluded. Doubtful players are excluded unless the 75% option is enabled. Prices are calculated in £0.1m units to avoid rounding errors.")
+                st.write("For players who rose in price, sale value follows the FPL half-profit rule. Purchase prices are reconstructed from transfer history; unchanged original picks use their season-start price.")
+
+            st.subheader(f"Current formation · {formation_label(manager_squad)}")
+            st.html(render_pitch(manager_squad, manager_gameweek))
