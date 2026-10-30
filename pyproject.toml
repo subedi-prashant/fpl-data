@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fpl-data"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fetch and store Fantasy Premier League data from public FPL endpoints"
 requires-python = ">=3.11"
 dependencies = [

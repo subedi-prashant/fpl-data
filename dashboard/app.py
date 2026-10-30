@@ -17,6 +17,12 @@ _ROOT = Path(__file__).parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# A stale pip-installed fpl-data can linger in hosted environments; make sure the
+# repo package is the one that gets imported.
+for _mod in [name for name in sys.modules if name == "fpl_data" or name.startswith("fpl_data.")]:
+    del sys.modules[_mod]
+import fpl_data  # noqa: F401
+
 try:
     from dotenv import load_dotenv
     load_dotenv(_ROOT / ".env")
