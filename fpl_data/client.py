@@ -20,7 +20,7 @@ USER_AGENT = "fpl-data/0.1 (github.com/my-fpl; polite-client)"
 _PLAYER_SLEEP = 0.3
 
 
-def _build_session() -> requests.Session:
+def build_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
     retry = Retry(
@@ -44,7 +44,7 @@ class FPLClient:
         raw_dir: Path = Path("data/raw"),
         cache_ttl_hours: float = 6.0,
     ) -> None:
-        self._session = _build_session()
+        self._session = build_session()
         self._raw_dir = raw_dir
         self._cache_ttl_seconds = cache_ttl_hours * 3600
         self._raw_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +72,11 @@ class FPLClient:
         """Return full fixture list."""
         log.info("Fetching fixtures from FPL API")
         return self._get(f"{BASE_URL}/fixtures/")
+
+    def get_event_live(self, gameweek: int) -> dict:
+        """Return every player's stats for one gameweek."""
+        log.debug("Fetching live stats for gameweek %d", gameweek)
+        return self._get(f"{BASE_URL}/event/{gameweek}/live/")
 
     def get_player_summary(self, player_id: int) -> dict:
         """Return per-player gameweek history and upcoming fixtures."""

@@ -392,6 +392,30 @@ def fetch_manager(
         raise typer.Exit(code=1)
 
 
+@app.command("backtest")
+def backtest(
+    from_gw: Annotated[int, typer.Option("--from-gw", help="First gameweek to predict (needs earlier data).")] = 4,
+    verbose: VerboseOption = False,
+    data_dir: DataDirOption = _DEFAULT_DATA,
+) -> None:
+    """Compare the xP model with the legacy heuristic on finished gameweeks."""
+    from fpl_data.backtest import run_backtest, summarise_backtest
+
+    _setup_logging(verbose)
+    client = FPLClient(raw_dir=data_dir / "raw", cache_ttl_hours=0)
+    bootstrap = client.get_bootstrap(force=True)
+    finished = [int(event["id"]) for event in bootstrap["events"] if event.get("finished")]
+    targets = [gameweek for gameweek in finished if gameweek >= max(2, from_gw)]
+    if not targets:
+        typer.echo("✗ Not enough finished gameweeks to backtest.", err=True)
+        raise typer.Exit(code=1)
+    live = {gameweek: client.get_event_live(gameweek) for gameweek in finished}
+    results = run_backtest(bootstrap, client.get_fixtures(), live, targets)
+    typer.echo(results.round(3).to_string(index=False))
+    typer.echo("\nAverage across gameweeks:")
+    typer.echo(summarise_backtest(results).to_string())
+
+
 @app.command("list-seasons")
 def list_seasons(
     manager_id: ManagerIDOption = None,
