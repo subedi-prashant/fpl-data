@@ -13,7 +13,7 @@ PROJECTION_COLUMNS = ["xp_next", "xmins_next", "availability_next", "availabilit
 PLANNER_COLUMNS = ["id", "web_name", "team_id", "team_short", "position", "now_cost", "status"]
 
 
-@st.cache_data(ttl=CACHE_TTL, max_entries=64, show_spinner="Searching every legal transfer…")
+@st.cache_resource(ttl=CACHE_TTL, max_entries=64, show_spinner="Searching every legal transfer…")
 def run_planner(squad: pd.DataFrame, players: pd.DataFrame, xp: pd.DataFrame, bank: int, settings: PlannerSettings, position: str | None, required_out: int | None):
     return plan_transfers(squad, players, xp, bank, settings, position=position, required_out=required_out)
 

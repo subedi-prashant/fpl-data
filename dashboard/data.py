@@ -90,7 +90,7 @@ def _fetch_gameweek_stats(finished_gameweeks: tuple[int, ...]) -> pd.DataFrame:
     return frames.build_gameweek_stats(dict(zip(finished_gameweeks, payloads)))
 
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+@st.cache_resource(ttl=CACHE_TTL, show_spinner=False)
 def load_league() -> League:
     bootstrap, raw_fixtures = _fetch_league_payloads()
     teams = frames.build_teams(bootstrap)
@@ -111,7 +111,7 @@ def load_league() -> League:
     )
 
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner="Projecting points for every player…")
+@st.cache_resource(ttl=CACHE_TTL, show_spinner="Projecting points for every player…")
 def load_projections() -> Projections:
     league = load_league()
     return project_players(
@@ -162,3 +162,4 @@ def load_manager(manager_id: int) -> Manager:
 
 def refresh() -> None:
     st.cache_data.clear()
+    st.cache_resource.clear()
