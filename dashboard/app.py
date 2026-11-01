@@ -68,7 +68,7 @@ with st.sidebar:
             "Manager ID",
             value=os.getenv("FPL_MANAGER_ID", "").strip(),
             key=ui.MANAGER_KEY,
-            placeholder="e.g. 1234567",
+            placeholder="e.g. 7540623",
             help="The number in your team's points page URL: fantasy.premierleague.com/entry/1234567/event/9",
             bind="query-params",
             validate=(r"^\d{1,10}$", "Use the digits from your team URL, e.g. 1234567."),
